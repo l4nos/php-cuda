@@ -1,0 +1,68 @@
+name: build
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  # Compile-only matrix: no GPU required, catches build regressions on every PR.
+  compile:
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ['8.1', '8.2', '8.3', '8.4']
+        cuda: ['11.8.0-devel-ubuntu22.04', '12.6.3-cudnn-devel-ubuntu24.04']
+    runs-on: ubuntu-latest
+    container: nvidia/cuda:${{ matrix.cuda }}
+    name: "PHP ${{ matrix.php }} / CUDA ${{ matrix.cuda }}"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install PHP ${{ matrix.php }} and build tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends software-properties-common
+          add-apt-repository -y ppa:ondrej/php
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            php${{ matrix.php }}-cli php${{ matrix.php }}-dev \
+            build-essential autoconf pkg-config
+
+      - name: phpize + configure + build
+        working-directory: plugin
+        run: |
+          phpize
+          ./configure --with-cuda=/usr/local/cuda --with-cudnn=/usr/local/cuda --with-nvrtc=/usr/local/cuda
+          make -j"$(nproc)"
+
+      - name: Extension loads
+        working-directory: plugin
+        run: php -d extension="$PWD/modules/cuda.so" -m | grep -i cuda
+
+      - name: Headers are self-contained
+        working-directory: plugin
+        run: |
+          set -e
+          for h in php_cuda.h tensor.h tensor_kernels.cuh cuda_kernels.cuh; do
+            echo "Checking $h"
+            echo "#include \"$h\"" > /tmp/hdr_check.c
+            gcc -fsyntax-only -I. -I/usr/local/cuda/include \
+              $(php-config --includes) /tmp/hdr_check.c || exit 1
+          done
+
+  # GPU test job: requires a self-hosted runner with an NVIDIA GPU.
+  gpu-tests:
+    runs-on: [self-hosted, gpu]
+    if: github.event_name == 'push'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        working-directory: plugin
+        run: |
+          phpize
+          ./configure --with-cuda=/usr/local/cuda --with-cudnn=/usr/local/cuda --with-nvrtc=/usr/local/cuda
+          make -j"$(nproc)"
+      - name: Run .phpt suite
+        working-directory: plugin
+        run: php run-tests.php -q -x -d extension="$PWD/modules/cuda.so" ../tests/

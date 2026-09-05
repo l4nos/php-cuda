@@ -1,194 +1,154 @@
 # PHP CUDA Extension
 
-A near production-ready PHP extension that provides CUDA support for high-performance computing and deep learning tasks. It still needs a lot more testing, anyone who can test or wants to contribute, feel free. I want nothing in return for writing this the goal was merely to level the playing field between PHP and Python and prove that PHP is as capable as it's reptilian counterpart.
+A CUDA driver for PHP: device-resident tensors, the NVIDIA library stack
+(cuBLAS, cuDNN, cuRAND-class ops), streams, CUDA graphs, and NVRTC runtime
+kernel compilation — the foundation layer that makes a "PHPTorch" possible.
 
-That being said, any donations are never refused.
+This project deliberately builds the **brick, not the wall**: autograd,
+`nn.Module`, optimizers and training loops belong to frameworks built *on top*
+of this driver. See [PLAN.md](PLAN.md) for the scope contract and roadmap.
 
 ## Features
 
-### Core CUDA Support
-- Device Management
-  - Get CUDA device count
-  - Query device properties
-  - Set/Get current device
-  - Device synchronization
-  - Device reset capabilities
-
-- Memory Management
-  - CUDA memory allocation
-  - Memory copying (host-to-device, device-to-host, device-to-device)
-  - Automatic resource cleanup
-  - Unified memory support
-  - Pinned memory operations
-  - Memory pool with fragmentation handling
-
-### cuBLAS Support
-- High-performance matrix operations
-- GEMM (General Matrix Multiplication)
-- Optimized linear algebra operations
-- Automatic handle management
-- Batch processing capabilities
-
-### cuDNN Support
-- Deep learning primitives
-- Convolution operations
-  - Forward convolution
-  - Backward convolution (data)
-  - Backward convolution (filter)
-- Pooling operations
-  - Forward pooling
-  - Backward pooling
-- Activation functions
-  - Forward activation
-  - Backward activation
-
-### Tensor Operations
-- Tensor creation and manipulation
-- Basic operations (add, multiply)
-- Activation functions (ReLU, sigmoid, tanh)
-- Gradient computation
-- Shape manipulation
-
-### Multi-GPU Support
-- Device affinity management
-- Load balancing
-- Multi-GPU computation
-- Device synchronization
-- Thread safety
-
-### Profiling and Monitoring
-- CUDA event timing
-- Memory usage tracking
-- Kernel metrics collection
-- Device utilization monitoring
-- Performance benchmarking
-
-### Error Handling
-- Comprehensive error checking
-- Error status retrieval
-- Error message translation
+- **`CudaTensor`** — device-resident n-dimensional arrays
+  - Refcounted storage with zero-copy views (`reshape`, `transpose`, `slice`)
+  - Broadcasting elementwise ops, `matmul` (cuBLAS), activations, softmax, reductions
+  - dtypes: fp32, fp64, int32, fp16, bf16, int8
+- **NVRTC** — compile and launch custom CUDA kernels from PHP at runtime
+- **Streams, events, CUDA graphs** — async execution and capture/replay
+- **cuBLAS** — GEMM, batched GEMM (correct row-major handling)
+- **cuDNN 8/9** — convolution forward (version-gated API)
+- **Memory** — device/pinned/unified allocations, growing memory pool with block reuse
+- **Multi-GPU** — device enumeration, switching, per-device tensors
+- **Error model** — `E_WARNING` + `false` by default, `CudaException` mode via `cuda.error_mode=exception`
 
 ## Requirements
 
-- PHP 7.0 or later
-- CUDA Toolkit 8.0 or later
-- cuBLAS (included with CUDA Toolkit)
-- cuDNN 7.0 or later
-- C compiler (gcc/clang)
-- PHP development files
-- NVTX (optional, for profiling)
+- PHP 8.1 – 8.5 (NTS or ZTS)
+- CUDA Toolkit 11.8 or newer (12.x recommended)
+- GPU with compute capability 7.0+ (Volta or newer; older archs down to 5.0 build with `--with-cuda-arch`)
+- cuDNN 8 or 9 (optional but recommended)
+- Linux (glibc). Windows/macOS are not supported (macOS has no CUDA).
 
 ## Installation
 
-1. Clone the repository:
 ```bash
-git clone https://github.com/yourusername/php-cuda.git
-cd php-cuda
+cd plugin
+./compile.sh            # auto-detects CUDA, cuDNN, GPU architectures
+./compile.sh --test     # build + run the test suite
 ```
 
-2. Run the compile script:
+Manual build:
+
 ```bash
-./compile.sh
+phpize
+./configure --with-cuda=/usr/local/cuda --with-cudnn=/usr/local/cuda --with-nvrtc=/usr/local/cuda
+make -j$(nproc)
+sudo make install
+echo "extension=cuda.so" | sudo tee "$(php-config --ini-dir)/cuda.ini"
 ```
+
+See [docs/INSTALL-UBUNTU.md](docs/INSTALL-UBUNTU.md) for the full Ubuntu 24.04
+guide (including the exact apt package set and common pitfalls), or use the
+reference [Dockerfile](Dockerfile).
+
+## Quick start
+
+```php
+<?php
+// Tensors live on the GPU; host transfers happen only at the edges.
+$a = CudaTensor::fromArray([[1.0, 2.0], [3.0, 4.0]]);
+$b = CudaTensor::full([2, 2], 0.5);
+
+$c = $a->matmul($b)->relu()->add(1.0);
+print_r($c->toArray());
+
+// Broadcasting, views, reductions
+$row = CudaTensor::fromArray([10.0, 20.0]);
+echo $a->add($row)->sum(), "\n";       // 40
+$t = $a->transpose();                   // zero-copy view
+print_r($t->shape());                   // [2, 2]
+
+// Custom kernels, compiled at runtime (NVRTC)
+$src = '
+extern "C" __global__ void scale2(float* x, long long n) {
+    long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) x[i] *= 2.0f;
+}';
+$kernel = cuda_kernel_compile($src, 'scale2');
+cuda_kernel_launch($kernel, [$a, 4], [1], [256]);
+cuda_device_synchronize();
+print_r($a->toArray());                 // [[2,4],[6,8]]
+
+// CUDA graphs: capture once, replay cheaply
+$stream = cuda_stream_create();
+cuda_graph_begin_capture($stream);
+cuda_kernel_launch($kernel, [$a, 4], [1], [256], $stream);
+$graph = cuda_graph_end_capture();
+cuda_graph_launch($graph, $stream);
+cuda_stream_synchronize($stream);
+```
+
+## API overview
+
+### CudaTensor (class)
+
+| Group | Methods |
+|---|---|
+| Constructors | `fromArray`, `zeros`, `ones`, `full`, `rand` |
+| Introspection | `shape`, `strides`, `dtype`, `ndim`, `size`, `nbytes`, `device`, `toArray`, `__toString` |
+| Arithmetic | `add`, `sub`, `mul`, `div` (+ in-place `add_`, `sub_`, `mul_`, `div_`), `matmul` |
+| Math | `relu`, `sigmoid`, `tanh`, `exp`, `log`, `sqrt`, `gelu`, `neg`, `softmax` |
+| Reductions | `sum`, `mean`, `max`, `min` |
+| Views | `reshape`, `transpose`, `slice`, `contiguous` |
+| Constants | `CudaTensor::FP32`, `FP64`, `INT32`, `FP16`, `BF16`, `INT8` |
+
+### Functions
+
+| Group | Functions |
+|---|---|
+| Device | `cuda_device_count`, `cuda_device_properties`, `cuda_set_device`, `cuda_get_device`, `cuda_device_reset`, `cuda_device_synchronize`, `cuda_driver_version`, `cuda_runtime_version` |
+| Memory | `cuda_malloc`, `cuda_free`, `cuda_memset`, `cuda_memcpy_host_to_device`, `cuda_memcpy_device_to_host`, `cuda_memcpy_device_to_device`, `cuda_pinned_alloc`, `cuda_unified_alloc`, `cuda_memory_get_info`, `cuda_measure_memory_bandwidth` |
+| Pool | `cuda_memory_pool_init`, `cuda_memory_pool_allocate`, `cuda_memory_pool_free`, `cuda_memory_pool_stats`, `cuda_memory_pool_destroy` |
+| Streams | `cuda_stream_create`, `cuda_stream_destroy`, `cuda_stream_synchronize`, `cuda_stream_query`, `cuda_stream_wait_event` |
+| Events | `cuda_event_create`, `cuda_event_record_start`, `cuda_event_record_stop`, `cuda_event_elapsed_time`, `cuda_event_destroy` |
+| Graphs | `cuda_graph_begin_capture`, `cuda_graph_end_capture`, `cuda_graph_launch`, `cuda_graph_destroy` |
+| cuBLAS | `cuda_cublas_create`, `cuda_cublas_destroy`, `cuda_cublas_matrix_multiply`, `cuda_cublas_gemm`, `cuda_batch_gemm` |
+| cuDNN | `cuda_cudnn_convolution_forward` (when built with cuDNN) |
+| NVRTC | `cuda_kernel_compile`, `cuda_kernel_launch` (when built with NVRTC) |
+| Errors | `cuda_get_last_error`, `cuda_get_error_string`, `cuda_get_error_name` |
+| Profiling | `cuda_profiler_start`, `cuda_profiler_stop` |
+| Legacy convenience | `cuda_matrix_multiply` (2-D PHP arrays) |
+
+### ini settings
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `cuda.default_device` | `0` | Device selected at request start |
+| `cuda.error_mode` | `warning` | `warning` (E_WARNING + false) or `exception` (throw `CudaException`) |
+| `cuda.enable_cpu_fallback` | `1` | Allow CPU fallback for `cuda_matrix_multiply` on GPU-less hosts |
+| `cuda.enable_memory_pool` | `0` | Reserved for the future pooled allocator default |
 
 ## Testing
 
-The extension includes a comprehensive test suite covering various aspects of functionality:
-
-### Running Tests
-
-To run all tests after installation:
 ```bash
-./compile.sh --test
+cd plugin
+php run-tests.php -q -d extension=$PWD/modules/cuda.so ../tests/
 ```
 
-To run individual test files:
-```bash
-cd tests/
-php run-test.php test_name.phpt
-```
-
-### Available Tests
-
-1. Basic Functionality (`001-basic.phpt`)
-   - Device management
-   - Basic matrix operations
-   - Error handling
-
-2. Memory Management (`002-memory.phpt`)
-   - Memory allocation/deallocation
-   - Memory pool operations
-   - Leak detection
-
-3. Stress Testing (`003-stress.phpt`)
-   - High-load operations
-   - Error recovery
-   - Concurrent operations
-
-4. Neural Network (`004-neural.phpt`)
-   - Layer operations
-   - Training functions
-   - Model persistence
-
-5. Tensor Operations (`005-tensor.phpt`)
-   - Tensor creation
-   - Basic operations
-   - Activation functions
-   - Gradient computation
-
-6. Advanced Memory (`006-advanced-memory.phpt`)
-   - Unified memory
-   - Pinned memory
-   - Memory pool fragmentation
-   - Bandwidth measurement
-
-7. Multi-GPU (`007-multi-gpu.phpt`)
-   - Device management
-   - Multi-GPU computation
-   - Device synchronization
-   - Thread safety
-
-8. cuBLAS (`008-cublas.phpt`)
-   - Basic operations
-   - GEMM operations
-   - Batch processing
-   - Performance benchmarks
-
-9. Profiling (`009-profiler.phpt`)
-   - Event timing
-   - Memory tracking
-   - Kernel metrics
-   - Device utilization
-
-### Test Requirements
-
-- Some tests require multiple GPUs (`007-multi-gpu.phpt`)
-- Profiling tests require NVTX support (`009-profiler.phpt`)
-- Memory tests require sufficient GPU memory
-- Neural network tests require cuDNN
-
-[Rest of the README content remains unchanged...]
-
-## Usage Examples
-
-[Previous usage examples remain unchanged...]
-
-## API Reference
-
-[Previous API reference remains unchanged...]
-
-## Performance Considerations
-
-[Previous performance considerations remain unchanged...]
+Tests skip gracefully when no GPU is present or when optional components
+(cuDNN, NVRTC) are not compiled in.
 
 ## Contributing
 
-Contributions are welcome! Please feel free to submit pull requests.
+Contributions welcome — see [PLAN.md](PLAN.md) for the roadmap and the
+definition of done. The CI matrix builds PHP 8.1–8.4 × CUDA 11.8/12.x on every
+PR; GPU tests run on a self-hosted runner.
 
 ## License
 
-MIT License - see LICENSE file for details.
+MIT License — see [LICENSE.MD](LICENSE.MD).
 
 ## Support
 
-For issues and questions, please use the GitHub issue tracker.
+Issues and questions: GitHub issue tracker.

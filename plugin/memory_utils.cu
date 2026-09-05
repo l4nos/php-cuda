@@ -116,7 +116,7 @@ extern "C" cudaError_t cuda_measure_memory_bandwidth(
     }
 
     // Measure bandwidth
-    cudaEventRecord(start);
+    cudaEventRecord(start, 0);
     err = cudaMemcpy(d_b, d_a, size, cudaMemcpyDeviceToDevice);
     if (err != cudaSuccess) {
         cudaEventDestroy(start);
@@ -125,7 +125,7 @@ extern "C" cudaError_t cuda_measure_memory_bandwidth(
         cudaFree(d_b);
         return err;
     }
-    cudaEventRecord(stop);
+    cudaEventRecord(stop, 0);
 
     cudaEventSynchronize(stop);
     cudaEventElapsedTime(&elapsed_time, start, stop);

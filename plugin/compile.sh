@@ -1,156 +1,197 @@
-#!/bin/bash
+#!/usr/bin/env bash
+#
+# compile.sh — build and install the PHP CUDA extension.
+#
+# Usage:
+#   ./compile.sh [--test] [--uninstall]
+#
+# Environment overrides:
+#   CUDA_PATH       CUDA toolkit root (default: autodetect)
+#   CUDNN_PATH      cuDNN root      (default: same as CUDA; "no" disables)
+#   CUDA_ARCH       GPU arch list, e.g. "75;80;90" or "native" (default: native)
+#   ENABLE_OPENMP=1 Build CPU fallback with OpenMP
+#   PHP_CONFIG      Path to php-config (default: autodetect)
 
-# Exit on error
-set -e
+set -euo pipefail
 
-# Function to detect CUDA installation
-find_cuda() {
-    local cuda_paths=("/usr/local/cuda" "/usr/local/cuda-"* "/opt/cuda" "/usr/cuda")
-    for path in "${cuda_paths[@]}"; do
-        if [ -d "$path" ]; then
-            echo "$path"
-            return 0
-        fi
-    done
-    return 1
-}
+cd "$(dirname "$0")"
 
-# Function to detect PHP development files
+log()  { echo "==> $*"; }
+warn() { echo "WARNING: $*" >&2; }
+die()  { echo "ERROR: $*" >&2; exit 1; }
+
+# ---------------------------------------------------------------------------
+# Locate PHP development files
+# ---------------------------------------------------------------------------
 find_php_config() {
-    local php_config_paths=("php-config" "/usr/local/bin/php-config" "/usr/bin/php-config")
-    for path in "${php_config_paths[@]}"; do
-        if command -v "$path" >/dev/null 2>&1; then
-            echo "$path"
-            return 0
+    if [ -n "${PHP_CONFIG:-}" ] && [ -x "$PHP_CONFIG" ]; then
+        echo "$PHP_CONFIG"; return 0
+    fi
+    for candidate in php-config /usr/local/bin/php-config /usr/bin/php-config; do
+        if command -v "$candidate" >/dev/null 2>&1; then
+            echo "$candidate"; return 0
         fi
     done
     return 1
 }
 
-# Function to check CUDA compatibility
-check_cuda_compatibility() {
-    local cuda_dir="$1"
-    local cuda_version=$(nvcc --version | grep "release" | awk '{print $6}' | cut -c2-)
-    local major_version=$(echo $cuda_version | cut -d. -f1)
-    
-    if [ "$major_version" -lt 8 ]; then
-        echo "Error: CUDA 8.0 or higher is required (found $cuda_version)"
-        exit 1
+PHP_CONFIG_BIN="$(find_php_config)" || die "php-config not found. Install the PHP development package (e.g. apt install php-dev)."
+PHP_VERSION="$("$PHP_CONFIG_BIN" --version)"
+PHP_EXTENSION_DIR="$("$PHP_CONFIG_BIN" --extension-dir)"
+log "PHP $PHP_VERSION (extension dir: $PHP_EXTENSION_DIR)"
+
+PHP_VERSION_MAJOR="${PHP_VERSION%%.*}"
+PHP_VERSION_MINOR="$(echo "$PHP_VERSION" | cut -d. -f2)"
+if [ "$PHP_VERSION_MAJOR" -lt 8 ] || { [ "$PHP_VERSION_MAJOR" -eq 8 ] && [ "$PHP_VERSION_MINOR" -lt 1 ]; }; then
+    die "PHP 8.1 or higher is required (found $PHP_VERSION)"
+fi
+
+command -v phpize >/dev/null 2>&1 || die "phpize not found. Install the PHP development package."
+
+# ---------------------------------------------------------------------------
+# Locate the CUDA toolkit
+# ---------------------------------------------------------------------------
+find_cuda() {
+    if [ -n "${CUDA_PATH:-}" ] && [ -f "$CUDA_PATH/include/cuda_runtime.h" ]; then
+        echo "$CUDA_PATH"; return 0
     fi
-    
-    # Check for compatible GPU
-    local has_compatible_gpu=$(nvidia-smi --query-gpu=compute_cap_major --format=csv,noheader | awk '$1 >= 3 {print}')
-    if [ -z "$has_compatible_gpu" ]; then
-        echo "Error: No compatible GPU found (requires compute capability 3.0 or higher)"
-        exit 1
+    if command -v nvcc >/dev/null 2>&1; then
+        (cd "$(dirname "$(command -v nvcc)")/.." && pwd); return 0
     fi
+    for path in /usr/local/cuda /usr/local/cuda-* /opt/cuda /usr/lib/cuda; do
+        if [ -f "$path/include/cuda_runtime.h" ]; then
+            echo "$path"; return 0
+        fi
+    done
+    return 1
 }
 
-# Function to check cuDNN
-check_cudnn() {
-    local cudnn_dir="$1"
-    if [ ! -f "$cudnn_dir/include/cudnn.h" ]; then
-        echo "Error: cuDNN not found in $cudnn_dir"
-        exit 1
+CUDA_DIR="$(find_cuda)" || die "CUDA toolkit not found. Install cuda-toolkit (11.8+) or set CUDA_PATH."
+log "CUDA toolkit: $CUDA_DIR"
+
+NVCC="$CUDA_DIR/bin/nvcc"
+[ -x "$NVCC" ] || NVCC="$(command -v nvcc)" || die "nvcc not found"
+
+NVCC_VERSION="$("$NVCC" --version | awk '/release/ {print $5}' | tr -d ',')"
+log "nvcc version: $NVCC_VERSION"
+
+# Mixed-toolchain detection: toolkit version.json vs nvcc
+if [ -f "$CUDA_DIR/version.json" ]; then
+    TOOLKIT_VERSION="$(awk -F'"' '/"cuda"/{getline; getline; print $4; exit}' "$CUDA_DIR/version.json" 2>/dev/null || true)"
+    if [ -n "$TOOLKIT_VERSION" ] && [ "${TOOLKIT_VERSION%%.*}" != "${NVCC_VERSION%%.*}" ]; then
+        die "Mixed CUDA toolchain detected: nvcc is $NVCC_VERSION but $CUDA_DIR is toolkit $TOOLKIT_VERSION. Fix PATH/CUDA_PATH so they match."
     fi
-    
-    local cudnn_version=$(grep CUDNN_MAJOR "$cudnn_dir/include/cudnn.h" | awk '{print $3}')
-    if [ "$cudnn_version" -lt 7 ]; then
-        echo "Error: cuDNN 7.0 or higher is required"
-        exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# Driver / runtime compatibility check
+# ---------------------------------------------------------------------------
+if command -v nvidia-smi >/dev/null 2>&1; then
+    DRIVER_CUDA="$(nvidia-smi 2>/dev/null | awk -F'CUDA Version: ' '/CUDA Version/ {print $2}' | awk '{print $1}' | head -n1 || true)"
+    if [ -n "$DRIVER_CUDA" ]; then
+        log "Driver supports CUDA runtime up to: $DRIVER_CUDA"
+        DRIVER_MAJOR="${DRIVER_CUDA%%.*}"
+        DRIVER_MINOR="$(echo "$DRIVER_CUDA" | cut -d. -f2)"
+        NVCC_MAJOR="${NVCC_VERSION%%.*}"
+        NVCC_MINOR="$(echo "$NVCC_VERSION" | cut -d. -f2)"
+        if [ "$NVCC_MAJOR" -gt "$DRIVER_MAJOR" ] || { [ "$NVCC_MAJOR" -eq "$DRIVER_MAJOR" ] && [ "$NVCC_MINOR" -gt "$DRIVER_MINOR" ]; }; then
+            warn "Toolkit runtime ($NVCC_VERSION) is newer than the driver's supported runtime ($DRIVER_CUDA)."
+            warn "Binaries may fail to load. Upgrade the NVIDIA driver or install the cuda-compat package."
+        fi
     fi
-}
-
-echo "Checking prerequisites..."
-
-# Check for PHP development files
-PHP_CONFIG=$(find_php_config)
-if [ -z "$PHP_CONFIG" ]; then
-    echo "Error: PHP development files not found. Please install PHP development package."
-    exit 1
+else
+    warn "nvidia-smi not found; skipping driver/runtime compatibility check (build-only host?)"
 fi
 
-# Get PHP extension directory
-PHP_EXTENSION_DIR=$("$PHP_CONFIG" --extension-dir)
-echo "PHP extension directory: $PHP_EXTENSION_DIR"
+# ---------------------------------------------------------------------------
+# Optional components
+# ---------------------------------------------------------------------------
+CONFIGURE_ARGS="--with-cuda=$CUDA_DIR"
 
-# Check for CUDA installation
-CUDA_PATH=$(find_cuda)
-if [ -z "$CUDA_PATH" ]; then
-    echo "Error: CUDA installation not found."
-    exit 1
-fi
-echo "CUDA installation found at: $CUDA_PATH"
-
-# Check CUDA compatibility
-check_cuda_compatibility "$CUDA_PATH"
-
-# Check for cuDNN if specified
-if [ -n "$CUDNN_PATH" ]; then
-    check_cudnn "$CUDNN_PATH"
-fi
-
-# Clean previous build files
-echo "Cleaning previous build files..."
-rm -rf .libs modules *.lo *.la *.o config.* Makefile* build libtool
-make clean-cuda 2>/dev/null || true
-
-# Generate configure script
-echo "Running phpize..."
-phpize
-
-# Configure the build
-echo "Configuring build..."
-CONFIGURE_ARGS="--with-cuda=$CUDA_PATH"
-if [ -n "$CUDNN_PATH" ]; then
+if [ "${CUDNN_PATH:-yes}" = "no" ]; then
+    CONFIGURE_ARGS="$CONFIGURE_ARGS --with-cudnn=no"
+elif [ -n "${CUDNN_PATH:-}" ]; then
+    [ -f "$CUDNN_PATH/include/cudnn.h" ] || die "cudnn.h not found under CUDNN_PATH=$CUDNN_PATH"
     CONFIGURE_ARGS="$CONFIGURE_ARGS --with-cudnn=$CUDNN_PATH"
 fi
-if [ -n "$NVTX_PATH" ]; then
-    CONFIGURE_ARGS="$CONFIGURE_ARGS --with-nvtx=$NVTX_PATH"
+
+if [ -n "${CUDA_ARCH:-}" ]; then
+    CONFIGURE_ARGS="$CONFIGURE_ARGS --with-cuda-arch=$CUDA_ARCH"
 fi
-if [ "$ENABLE_OPENMP" = "1" ]; then
+
+if [ "${ENABLE_NVTX:-0}" = "1" ]; then
+    CONFIGURE_ARGS="$CONFIGURE_ARGS --with-nvtx"
+fi
+
+if [ "${ENABLE_OPENMP:-0}" = "1" ]; then
     CONFIGURE_ARGS="$CONFIGURE_ARGS --enable-openmp"
 fi
 
+# ---------------------------------------------------------------------------
+# Uninstall
+# ---------------------------------------------------------------------------
+if [ "${1:-}" = "--uninstall" ]; then
+    PHP_INI_DIR="$("$PHP_CONFIG_BIN" --ini-dir)"
+    log "Removing extension and configuration"
+    sudo rm -f "$PHP_EXTENSION_DIR/cuda.so" "$PHP_INI_DIR/cuda.ini"
+    log "Uninstalled. Restart your PHP processes."
+    exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Clean previous build artifacts (never config.m4 / config.w32 / sources)
+# ---------------------------------------------------------------------------
+log "Cleaning previous build artifacts"
+rm -rf .libs modules build autom4te.cache libtool
+rm -f  *.lo *.la *.o cuda.la
+rm -f  configure configure.in aclocal.m4
+rm -f  config.h config.h.in config.h.in~ config.log config.status config.nice
+rm -f  Makefile Makefile.objects Makefile.fragments Makefile.global
+rm -f  run-tests.php
+
+# ---------------------------------------------------------------------------
+# Build
+# ---------------------------------------------------------------------------
+log "Running phpize"
+phpize
+
+log "Configuring: ./configure $CONFIGURE_ARGS"
+# shellcheck disable=SC2086
 ./configure $CONFIGURE_ARGS
 
-# Build the extension
-echo "Building extension..."
-make clean
-make
+log "Building"
+make -j"$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)"
 
-# Verify the build
-echo "Verifying build..."
-if [ ! -f "modules/cuda.so" ]; then
-    echo "Error: Build failed - cuda.so not found"
-    exit 1
-fi
+[ -f "modules/cuda.so" ] || die "Build failed: modules/cuda.so not found"
 
-# Install the extension
-echo "Installing extension..."
+# ---------------------------------------------------------------------------
+# Install
+# ---------------------------------------------------------------------------
+log "Installing"
 sudo make install
 
-# Update PHP configuration
-echo "Updating PHP configuration..."
-PHP_INI_DIR=$("$PHP_CONFIG" --ini-dir)
+PHP_INI_DIR="$("$PHP_CONFIG_BIN" --ini-dir)"
 if [ ! -f "$PHP_INI_DIR/cuda.ini" ]; then
-    echo "extension=cuda.so" | sudo tee "$PHP_INI_DIR/cuda.ini"
+    log "Writing $PHP_INI_DIR/cuda.ini"
+    echo "extension=cuda.so" | sudo tee "$PHP_INI_DIR/cuda.ini" >/dev/null
 fi
 
-# Run tests if requested
-if [ "$1" = "--test" ]; then
-    echo "Running tests..."
-    make test
-fi
-
-echo "Build complete!"
-echo "Please restart your PHP server/process for the changes to take effect."
-
-# Verify installation
-php -m | grep -q "cuda"
-if [ $? -eq 0 ]; then
-    echo "CUDA extension successfully installed and enabled"
+# ---------------------------------------------------------------------------
+# Verify
+# ---------------------------------------------------------------------------
+if php -m | grep -q '^cuda$'; then
+    log "CUDA extension installed and enabled"
+    php -r 'printf("Devices visible: %d\n", cuda_device_count());' || true
 else
-    echo "Warning: CUDA extension installed but not enabled in PHP"
-    echo "Please check your PHP configuration"
+    warn "Extension installed but not loaded by the CLI SAPI. Check $PHP_INI_DIR/cuda.ini."
 fi
+
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
+if [ "${1:-}" = "--test" ]; then
+    log "Running test suite"
+    php run-tests.php -q -x -d extension="$PWD/modules/cuda.so" ../tests/ || true
+fi
+
+log "Done. Restart long-running PHP processes (php-fpm, RoadRunner, etc.) to pick up the new build."

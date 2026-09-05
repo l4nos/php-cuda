@@ -19,6 +19,9 @@ extern "C" cudaError_t cuda_batch_convolution_kernel(
     cudnnTensorDescriptor_t* output_descs = new cudnnTensorDescriptor_t[batch_count];
     cudnnFilterDescriptor_t* filter_descs = new cudnnFilterDescriptor_t[batch_count];
     cudnnConvolutionDescriptor_t* conv_descs = new cudnnConvolutionDescriptor_t[batch_count];
+
+    // Honor the caller's stream (default stream when 0)
+    cudnnSetStream(handle, stream);
     
     // Initialize descriptors
     for (int i = 0; i < batch_count; i++) {
@@ -78,8 +81,23 @@ extern "C" cudaError_t cuda_batch_convolution_kernel(
         );
     }
     
-    // Find best algorithm
+    // Find best algorithm (version-gated: the legacy API was removed in cuDNN 9)
     cudnnConvolutionFwdAlgo_t algo;
+#if CUDNN_MAJOR >= 8
+    int algo_count = 0;
+    cudnnConvolutionFwdAlgoPerf_t perf;
+    cudnnGetConvolutionForwardAlgorithm_v7(
+        handle,
+        input_descs[0],
+        filter_descs[0],
+        conv_descs[0],
+        output_descs[0],
+        1,
+        &algo_count,
+        &perf
+    );
+    algo = (algo_count > 0) ? perf.algo : CUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_GEMM;
+#else
     cudnnGetConvolutionForwardAlgorithm(
         handle,
         input_descs[0],
@@ -90,6 +108,7 @@ extern "C" cudaError_t cuda_batch_convolution_kernel(
         0,
         &algo
     );
+#endif
     
     // Get workspace size
     size_t workspace_size = 0;
