@@ -4,6 +4,9 @@ on:
   push:
     branches: [main, master]
   pull_request:
+  # Manual trigger: the only way to run gpu-tests until a self-hosted GPU
+  # runner is registered on the repository.
+  workflow_dispatch:
 
 jobs:
   # Compile-only matrix: no GPU required, catches build regressions on every PR.
@@ -73,9 +76,11 @@ jobs:
           done
 
   # GPU test job: requires a self-hosted runner with an NVIDIA GPU.
+  # Manual-trigger only: without a registered runner this job would queue
+  # forever on every push.
   gpu-tests:
     runs-on: [self-hosted, gpu]
-    if: github.event_name == 'push'
+    if: github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@v4
       - name: Build
