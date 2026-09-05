@@ -29,8 +29,23 @@ jobs:
           ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo "$TZ" > /etc/timezone
           apt-get update
           apt-get install -y --no-install-recommends software-properties-common
-          add-apt-repository -y ppa:ondrej/php
-          apt-get update
+
+          # add-apt-repository talks to Launchpad, which intermittently returns
+          # 504s. Retry with backoff instead of failing the whole job.
+          for attempt in 1 2 3 4 5; do
+            if add-apt-repository -y ppa:ondrej/php; then
+              break
+            fi
+            echo "add-apt-repository failed (attempt $attempt/5), retrying..."
+            sleep $((attempt * 15))
+          done
+
+          for attempt in 1 2 3; do
+            apt-get update && break
+            echo "apt-get update failed (attempt $attempt/3), retrying..."
+            sleep $((attempt * 10))
+          done
+
           apt-get install -y --no-install-recommends \
             php${{ matrix.php }}-cli php${{ matrix.php }}-dev \
             build-essential autoconf pkg-config
