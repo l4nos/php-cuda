@@ -3,6 +3,7 @@
 
 #include <cuda_runtime.h>
 #include <pthread.h>
+#include <atomic>
 #include "cuda_utils.cuh"
 
 #define MAX_POOL_BLOCKS 1024  // Increased from 16

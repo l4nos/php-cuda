@@ -1,0 +1,34 @@
+# phpize / configure / make artifacts
+plugin/.libs/
+plugin/.deps/
+plugin/autom4te.cache/
+plugin/build/
+plugin/Makefile
+plugin/Makefile.fragments
+plugin/Makefile.global
+plugin/Makefile.objects
+plugin/confdefs.h
+plugin/conftest.c
+plugin/conftest.cu
+plugin/config.h
+plugin/config.h.in
+plugin/config.h.in~
+plugin/config.log
+plugin/config.nice
+plugin/config.status
+plugin/configure
+plugin/configure.ac
+plugin/configure.in
+plugin/configure~
+plugin/aclocal.m4
+plugin/libtool
+plugin/modules/
+plugin/run-tests.php
+plugin/include/
+plugin/*.lo
+plugin/*.la
+plugin/*.o
+plugin/*.dep
+
+# OS noise
+.DS_Store

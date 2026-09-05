@@ -2,51 +2,37 @@
 #define PROFILER_CUH
 
 #include <cuda_runtime.h>
-#include <nvToolsExt.h>
 #include "cuda_utils.cuh"
 
-// Performance profiling and monitoring
-struct ProfilerEvent {
-    const char* name;
-    cudaEvent_t start;
-    cudaEvent_t stop;
-    float duration;
-};
+#if defined(HAVE_NVTX)
+#  if defined(HAVE_NVTX3)
+#    include <nvtx3/nvToolsExt.h>
+#  else
+#    include <nvToolsExt.h>
+#  endif
+#endif
 
-extern "C" {
-    // Profiler management
-    cudaError_t cuda_profiler_start();
-    cudaError_t cuda_profiler_stop();
-    
-    // Event management
-    cudaError_t cuda_event_create(ProfilerEvent** event, const char* name);
-    cudaError_t cuda_event_destroy(ProfilerEvent* event);
-    cudaError_t cuda_event_record_start(ProfilerEvent* event);
-    cudaError_t cuda_event_record_stop(ProfilerEvent* event);
-    float cuda_event_elapsed_time(ProfilerEvent* event);
-    
-    // Memory tracking
-    cudaError_t cuda_memory_get_info(size_t* free, size_t* total);
-    cudaError_t cuda_memory_get_peak_usage();
-    
-    // Performance metrics
-    cudaError_t cuda_get_device_utilization();
-    cudaError_t cuda_get_memory_utilization();
-    cudaError_t cuda_get_kernel_metrics(const char* kernel_name);
-}
+/*
+ * Profiling helpers. NVTX range markers compile to no-ops when the extension
+ * is built without NVTX, so call sites never need their own guards.
+ */
 
-// RAII-style profiler marker
+#ifdef HAVE_NVTX
+
 class ProfilerMarker {
 public:
-    ProfilerMarker(const char* name) {
-        nvtxRangePushA(name);
-    }
-    ~ProfilerMarker() {
-        nvtxRangePop();
-    }
+    explicit ProfilerMarker(const char *name) { nvtxRangePushA(name); }
+    ~ProfilerMarker() { nvtxRangePop(); }
 };
 
 #define PROFILE_SCOPE(name) ProfilerMarker __profiler_marker__(name)
 #define PROFILE_FUNCTION() PROFILE_SCOPE(__FUNCTION__)
+
+#else
+
+#define PROFILE_SCOPE(name) ((void)0)
+#define PROFILE_FUNCTION() ((void)0)
+
+#endif /* HAVE_NVTX */
 
 #endif // PROFILER_CUH

@@ -1,5 +1,7 @@
 #include "memory_pool.cuh"
 #include <atomic>
+#include <stdexcept>
+#include <exception>
 
 extern "C" cudaError_t cuda_memory_pool_create(
     MemoryPool** pool,
