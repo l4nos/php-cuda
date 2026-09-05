@@ -1,0 +1,56 @@
+{
+    "name": "php-cuda/cuda",
+    "description": "CUDA driver for PHP: device tensors, cuBLAS/cuDNN, streams, CUDA graphs and NVRTC runtime kernel compilation.",
+    "type": "php-ext",
+    "license": "MIT",
+    "keywords": ["cuda", "gpu", "tensor", "cublas", "cudnn", "nvrtc", "hpc", "machine-learning"],
+    "homepage": "https://github.com/l4nos/php-cuda",
+    "require": {
+        "php": ">=8.1"
+    },
+    "require-dev": {
+        "phpstan/phpstan": "^1.10"
+    },
+    "autoload": {
+        "psr-4": {
+            "Cuda\\": "src/"
+        }
+    },
+    "extra": {
+        "php-ext": {
+            "extension-name": "cuda",
+            "configure-options": [
+                {
+                    "name": "with-cuda",
+                    "description": "CUDA toolkit root directory",
+                    "needs-value": true
+                },
+                {
+                    "name": "with-cuda-arch",
+                    "description": "GPU architectures (e.g. '75;80;90' or 'native')",
+                    "needs-value": true
+                },
+                {
+                    "name": "with-cudnn",
+                    "description": "cuDNN root directory (or 'no')",
+                    "needs-value": true
+                },
+                {
+                    "name": "with-nvrtc",
+                    "description": "NVRTC root directory (or 'no')",
+                    "needs-value": true
+                },
+                {
+                    "name": "with-nvtx",
+                    "description": "Enable NVTX profiling ranges",
+                    "needs-value": false
+                },
+                {
+                    "name": "enable-openmp",
+                    "description": "Enable OpenMP for CPU fallback",
+                    "needs-value": false
+                }
+            ]
+        }
+    }
+}
